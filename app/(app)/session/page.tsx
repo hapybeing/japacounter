@@ -32,10 +32,13 @@ export default function SessionPage() {
             className="min-h-24 w-full rounded-xl border border-white/15 bg-black/35 p-3 text-zinc-100 outline-none focus:border-gold"
           />
           <div className="mt-3 flex flex-wrap gap-3">
-            <button onClick={s.saveMantra} className="min-h-12 rounded-xl border border-gold px-4 py-3 text-sm text-gold">Save Mantra</button>
+            <button onClick={s.saveMantra} className={`min-h-12 rounded-xl border px-4 py-3 text-sm transition ${s.saveState==='saved'?'border-emerald-400 text-emerald-300 shadow-[0_0_24px_rgba(16,185,129,0.25)]':'border-gold text-gold'} ${s.saveState==='saving'?'animate-pulse':''}`}>
+              {s.saveState === 'saved' ? '✓ Mantra Saved' : s.saveState === 'saving' ? 'Saving...' : 'Save Mantra'}
+            </button>
             <button onClick={s.initMic} className="min-h-12 rounded-xl border border-white/20 px-4 py-3 text-sm">Enable Mic</button>
           </div>
           {s.mantraRef && <p className="mt-2 text-xs text-zinc-400">Saved: {s.mantraRef.text} • Estimated phrase duration: {(s.mantraRef.expectedPhraseMs / 1000).toFixed(2)}s</p>}
+          {s.saveMessage && <p className={`mt-2 text-xs ${s.saveState==='error'?'text-red-400':'text-emerald-300'}`}>{s.saveMessage}</p>}
         </section>
 
         <section className="mt-4 rounded-2xl border border-white/10 bg-black/25 p-4">

@@ -1,5 +1,6 @@
 import './globals.css';
 import Link from 'next/link';
+import { SessionStoreProvider } from '@/lib/engine/session-store';
 
 export const metadata = {
   title: 'JapaCounter',
@@ -18,7 +19,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </div>
           </nav>
         </header>
-        {children}
+        <SessionStoreProvider>{children}</SessionStoreProvider>
       </body>
     </html>
   );

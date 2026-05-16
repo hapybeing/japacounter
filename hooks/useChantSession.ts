@@ -3,6 +3,7 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { buildFingerprint, cosineSimilarity } from '@/lib/audio/fingerprint';
 import { CountingEngine } from '@/lib/engine/counting-engine';
+import { useSessionStore } from '@/lib/engine/session-store';
 import type { Fingerprint, MantraReference } from '@/lib/engine/types';
 
 type DetectionState =
@@ -31,14 +32,26 @@ const estimateSyllables = (token: string) => Math.max(1, (token.match(/[aeiouy]+
 
 export function useChantSession() {
   const [count, setCount] = useState(0);
-  const [confidence, setConfidence] = useState(0);
   const [running, setRunning] = useState(false);
   const [isCalibrating, setIsCalibrating] = useState(false);
-  const [fingerprint, setFingerprint] = useState<Fingerprint | null>(null);
   const [status, setStatus] = useState<DetectionState>('needs_text_reference');
   const [summary, setSummary] = useState<Summary>({ matchedCounts: 0, ignoredPartials: 0, lowConfidenceEvents: 0, avgConfidence: 0 });
-  const [mantraText, setMantraText] = useState('');
-  const [mantraRef, setMantraRef] = useState<MantraReference | null>(null);
+  const {
+    mantraDraft,
+    setMantraDraft,
+    activeMantra: mantraRef,
+    setActiveMantra: setMantraRef,
+    audioCalibration: fingerprint,
+    setAudioCalibration: setFingerprint,
+    setMicEnabled,
+    setListening,
+    setMatching,
+    confidence,
+    setConfidence,
+    saveState,
+    saveMessage,
+    setSaveState
+  } = useSessionStore();
   const [recordingMs, setRecordingMs] = useState(0);
   const [waveform, setWaveform] = useState<number[]>([]);
 
@@ -61,7 +74,7 @@ export function useChantSession() {
     if (savedMantra && !mantraRef) {
       const parsed = JSON.parse(savedMantra) as MantraReference;
       setMantraRef(parsed);
-      setMantraText(parsed.text);
+      setMantraDraft(parsed.text);
       setStatus('idle');
     }
     const savedFp = localStorage.getItem(FP_KEY);
@@ -73,10 +86,10 @@ export function useChantSession() {
         localStorage.removeItem(FP_KEY);
       }
     }
-  }, [fingerprint, mantraRef]);
+  }, [fingerprint, mantraRef, setFingerprint, setMantraDraft, setMantraRef]);
 
   const saveMantra = useCallback(() => {
-    const normalized = normalize(mantraText);
+    const normalized = normalize(mantraDraft);
     const tokens = normalized.split(' ').filter(Boolean);
     if (tokens.length < 2) {
       setStatus('needs_text_reference');
@@ -84,13 +97,22 @@ export function useChantSession() {
     }
     const syllableEstimate = tokens.reduce((n, t) => n + estimateSyllables(t), 0);
     const expectedPhraseMs = Math.max(1200, syllableEstimate * 240);
-    const ref: MantraReference = { text: mantraText.trim(), normalized, tokens, syllableEstimate, expectedPhraseMs };
+    const ref: MantraReference = { text: mantraDraft.trim(), normalized, tokens, syllableEstimate, expectedPhraseMs };
     setMantraRef(ref);
-    localStorage.setItem(MANTRA_KEY, JSON.stringify(ref));
-    rebuildEngine(ref, fingerprint);
-    setStatus('idle');
-    return true;
-  }, [fingerprint, mantraText, rebuildEngine]);
+    try {
+      setSaveState('saving', 'Saving mantra...');
+      localStorage.setItem(MANTRA_KEY, JSON.stringify(ref));
+      rebuildEngine(ref, fingerprint);
+      setStatus('idle');
+      setSaveState('saved', 'Primary mantra reference active');
+      if (process.env.NODE_ENV === 'development') console.info('[japa] mantra saved', ref);
+      return true;
+    } catch (error) {
+      setSaveState('error', 'Failed to save mantra locally');
+      if (process.env.NODE_ENV === 'development') console.error('[japa] mantra save failed', error);
+      return false;
+    }
+  }, [fingerprint, mantraDraft, rebuildEngine, setSaveState]);
 
   const initMic = useCallback(async () => {
     loadSaved();
@@ -107,7 +129,9 @@ export function useChantSession() {
     streamRef.current = stream;
     audioCtxRef.current = ctx;
     analyserRef.current = analyser;
-  }, [loadSaved]);
+    setMicEnabled(true);
+    if (process.env.NODE_ENV === 'development') console.info('[japa] mic enabled');
+  }, [loadSaved, setMicEnabled]);
 
   const startCalibration = useCallback(async () => {
     await initMic();
@@ -163,9 +187,10 @@ export function useChantSession() {
     setFingerprint(fp);
     localStorage.setItem(FP_KEY, JSON.stringify(fp));
     rebuildEngine(mantraRef, fp);
+    if (process.env.NODE_ENV === 'development') console.info('[japa] calibration linked', { hasMantra: Boolean(mantraRef) });
     setStatus('idle');
     setIsCalibrating(false);
-  }, [mantraRef, rebuildEngine]);
+  }, [mantraRef, rebuildEngine, setFingerprint]);
 
   const tick = useCallback(() => {
     if (!running || !analyserRef.current || !engineRef.current || !audioCtxRef.current || !mantraRef) return;
@@ -177,6 +202,8 @@ export function useChantSession() {
     if (energy < 0.012) {
       engineRef.current.decayProgress();
       setStatus('listening');
+      setMatching(false);
+      setListening(true);
       rafRef.current = requestAnimationFrame(tick);
       return;
     }
@@ -193,12 +220,14 @@ export function useChantSession() {
 
     if (combined < 0.76) {
       setStatus('partial_ignored');
+      setMatching(false);
       setSummary((s) => ({ ...s, ignoredPartials: s.ignoredPartials + 1, avgConfidence }));
       rafRef.current = requestAnimationFrame(tick);
       return;
     }
     if (combined < 0.82) {
       setStatus('low_confidence');
+      setMatching(false);
       setSummary((s) => ({ ...s, lowConfidenceEvents: s.lowConfidenceEvents + 1, avgConfidence }));
       rafRef.current = requestAnimationFrame(tick);
       return;
@@ -210,12 +239,14 @@ export function useChantSession() {
     if (next > count) {
       setCount(next);
       setStatus('reference_matched');
+      setMatching(true);
       setSummary((s) => ({ ...s, matchedCounts: next, avgConfidence }));
     } else {
       setStatus('listening');
+      setListening(true);
     }
     rafRef.current = requestAnimationFrame(tick);
-  }, [count, fingerprint, mantraRef, running]);
+  }, [count, fingerprint, mantraRef, running, setListening, setMatching]);
 
   const start = useCallback(() => {
     if (!mantraRef) {
@@ -224,15 +255,17 @@ export function useChantSession() {
     }
     rebuildEngine(mantraRef, fingerprint);
     setRunning(true);
+    setListening(true);
     setStatus('listening');
     rafRef.current = requestAnimationFrame(tick);
-  }, [fingerprint, mantraRef, rebuildEngine, tick]);
+  }, [fingerprint, mantraRef, rebuildEngine, tick, setListening]);
 
   const pause = useCallback(() => {
     setRunning(false);
+    setListening(false);
     setStatus('paused');
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
-  }, []);
+  }, [setListening]);
 
   return useMemo(
     () => ({
@@ -242,19 +275,21 @@ export function useChantSession() {
       status,
       summary,
       fingerprint,
-      mantraText,
+      mantraText: mantraDraft,
       mantraRef,
       recordingMs,
       waveform,
       isCalibrating,
-      setMantraText,
+      setMantraText: setMantraDraft,
       saveMantra,
+      saveState,
+      saveMessage,
       initMic,
       startCalibration,
       stopCalibration,
       start,
       pause
     }),
-    [confidence, count, fingerprint, initMic, isCalibrating, mantraRef, mantraText, pause, recordingMs, running, saveMantra, start, startCalibration, status, stopCalibration, summary, waveform]
+    [confidence, count, fingerprint, initMic, isCalibrating, mantraDraft, mantraRef, pause, recordingMs, running, saveMantra, saveMessage, saveState, setMantraDraft, start, startCalibration, status, stopCalibration, summary, waveform]
   );
 }
